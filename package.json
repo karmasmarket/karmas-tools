@@ -13,6 +13,7 @@
     "@ffmpeg/ffmpeg": "^0.12.15",
     "@ffmpeg/util": "^0.12.2",
     "fabric": "^6.7.1",
+    "firebase": "^12.16.0",
     "html2canvas": "^1.4.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

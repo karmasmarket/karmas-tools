@@ -1,8 +1,31 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Canvas, Textbox, Rect, Circle, Triangle, FabricImage, Group } from "fabric";
+import { initializeApp, getApps } from "firebase/app";
+import { getFirestore, doc, getDoc, setDoc } from "firebase/firestore";
 import Toolbar from "./components/Toolbar";
 import Sidebar from "./components/Sidebar";
 import TemplateGallery from "./components/TemplateGallery";
+
+/* =====================================
+    FIREBASE INIT (same project as Karmas Market)
+    Replace with your actual config values from index.html
+====================================== */
+const firebaseConfig = {
+  apiKey: "AIzaSyADxrvh97PxTqjkeXKoHP0_XK8HRa8AmpA",
+  authDomain: "realistic-market-show.firebaseapp.com",
+  projectId: "realistic-market-show",
+  storageBucket: "realistic-market-show.appspot.com",
+  messagingSenderId:  "390618933993",
+  appId: "1:390618933993:web:8dc95add0ab530bd171e78",
+};
+
+const firebaseApp = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
+const db = getFirestore(firebaseApp);
+
+const FREE_USES = 5;
+const RESET_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+const TOOL_NAME = "flyerDesigner";
+const TOOL_PRICE = 500; // ₦500 after free uses run out
 
 function FlyerEditor() {
   const canvasRef = useRef(null);
@@ -13,6 +36,86 @@ function FlyerEditor() {
   const [layers, setLayers] = useState([]);
   const [selectedIds, setSelectedIds] = useState([]);
   const gridLineRefs = useRef([]);
+
+  // ---- User identity (passed from Karmas Market redirect) ----
+  const [userEmail, setUserEmail] = useState(null);
+  const [usageInfo, setUsageInfo] = useState({ count: 0, lastReset: null });
+  const [usageLoading, setUsageLoading] = useState(true);
+
+  /* =====================================
+      READ USER EMAIL FROM URL ON LOAD
+  ====================================== */
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const emailFromUrl = urlParams.get("userEmail");
+    if (emailFromUrl) {
+      setUserEmail(decodeURIComponent(emailFromUrl));
+    }
+  }, []);
+
+  /* =====================================
+      LOAD CURRENT USAGE FROM FIRESTORE
+  ====================================== */
+  useEffect(() => {
+    async function loadUsage() {
+      if (!userEmail) {
+        setUsageLoading(false);
+        return;
+      }
+      try {
+        const usageRef = doc(db, "toolUsage", `${userEmail}_${TOOL_NAME}`);
+        const usageSnap = await getDoc(usageRef);
+        if (usageSnap.exists()) {
+          setUsageInfo(usageSnap.data());
+        } else {
+          setUsageInfo({ count: 0, lastReset: Date.now() });
+        }
+      } catch (err) {
+        console.error("Failed to load tool usage:", err);
+      } finally {
+        setUsageLoading(false);
+      }
+    }
+    loadUsage();
+  }, [userEmail]);
+
+  /* =====================================
+      HELPER: check + increment usage, returns true if allowed
+  ====================================== */
+  const checkAndIncrementUsage = useCallback(async () => {
+    if (!userEmail) {
+      alert("Please access this tool through Karmas Market so we can track your usage.");
+      return false;
+    }
+
+    const usageRef = doc(db, "toolUsage", `${userEmail}_${TOOL_NAME}`);
+    const usageSnap = await getDoc(usageRef);
+    const data = usageSnap.exists() ? usageSnap.data() : { count: 0, lastReset: Date.now() };
+
+    const now = Date.now();
+    const timeSinceReset = now - (data.lastReset || now);
+    const windowExpired = timeSinceReset >= RESET_WINDOW_MS;
+
+    const currentCount = windowExpired ? 0 : (data.count || 0);
+
+    if (currentCount >= FREE_USES) {
+      const msRemaining = RESET_WINDOW_MS - timeSinceReset;
+      const hoursLeft = Math.max(1, Math.ceil(msRemaining / (60 * 60 * 1000)));
+      alert(
+        `You've used your ${FREE_USES} free downloads for Flyer Designer.\n\n` +
+        `Pay ₦${TOOL_PRICE} to continue now, or wait ${hoursLeft} more hour(s) for your free uses to reset.`
+      );
+      return false;
+    }
+
+    const newCount = currentCount + 1;
+    const newLastReset = windowExpired ? now : (data.lastReset || now);
+
+    await setDoc(usageRef, { count: newCount, lastReset: newLastReset });
+    setUsageInfo({ count: newCount, lastReset: newLastReset });
+
+    return true;
+  }, [userEmail]);
 
   /* =====================================
       SAVE HISTORY STATE
@@ -46,7 +149,6 @@ function FlyerEditor() {
       setSelectedIds([]);
     }
   }, []);
-
   /* =====================================
       DRAW GRID
   ====================================== */
@@ -73,7 +175,8 @@ function FlyerEditor() {
     gridLineRefs.current = lines;
     canvas.requestRenderAll();
   }, []);
-/* =====================================
+
+  /* =====================================
       INITIALIZE FABRIC
   ====================================== */
   useEffect(() => {
@@ -151,7 +254,6 @@ function FlyerEditor() {
       });
     });
   }, [snapEnabled]);
-
   /* =====================================
       ADD SHAPES / TEXT
   ====================================== */
@@ -197,8 +299,17 @@ function FlyerEditor() {
     const active = canvas.getActiveObject(); if (!active || active.type !== "textbox") return;
     active.set({ fontFamily: event.target.value }); canvas.requestRenderAll();
   }
-  function downloadPNG() {
-    const canvas = canvasRef.current; if (!canvas) return;
+
+  /* =====================================
+      DOWNLOAD PNG (now gated by usage limit)
+  ====================================== */
+  async function downloadPNG() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const allowed = await checkAndIncrementUsage();
+    if (!allowed) return;
+
     const link = document.createElement("a");
     link.download = "karma-flyer.png";
     link.href = canvas.toDataURL({ format: "png", multiplier: 2 });
@@ -243,8 +354,7 @@ function FlyerEditor() {
       canvas.add(cloned); canvas.setActiveObject(cloned); canvas.requestRenderAll(); saveHistory();
     });
   }
-
-  /* =====================================
+/* =====================================
       DELETE
   ====================================== */
   function deleteObject() {
@@ -351,8 +461,7 @@ function FlyerEditor() {
     const active = canvas.getActiveObject(); if (!active) return;
     canvas.sendObjectBackwards(active); canvas.requestRenderAll(); refreshLayers(); saveHistory();
   }
-
-  /* =====================================
+/* =====================================
       LOAD TEMPLATE
   ====================================== */
   function loadTemplate(template) {
@@ -410,11 +519,22 @@ function FlyerEditor() {
     saveHistory();
   }
 
+  const usesRemaining = Math.max(0, FREE_USES - (usageInfo.count || 0));
+
   return (
     <div style={{ background: "#111", minHeight: "100vh", padding: "20px" }}>
-      <h1 style={{ textAlign: "center", color: "#ffffff", fontFamily: "Arial", fontSize: "36px", marginBottom: "20px", letterSpacing: "2px" }}>
+      <h1 style={{ textAlign: "center", color: "#ffffff", fontFamily: "Arial", fontSize: "36px", marginBottom: "10px", letterSpacing: "2px" }}>
         Karma Ad Maker
       </h1>
+
+      {/* Usage status banner */}
+      <div style={{ textAlign: "center", color: "#ffd700", fontFamily: "Arial", fontSize: "14px", marginBottom: "20px" }}>
+        {usageLoading
+          ? "Checking your usage..."
+          : userEmail
+            ? `${usesRemaining} free download${usesRemaining === 1 ? "" : "s"} remaining today • ₦${TOOL_PRICE} after that`
+            : "Open this tool from Karmas Market to track your free uses"}
+      </div>
 
       <TemplateGallery onSelectTemplate={loadTemplate} />
 
